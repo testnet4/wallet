@@ -1,0 +1,1569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bitcoin Testnet4 Taproot Wallet</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: {
+              50: '#f0fdf4',
+              100: '#dcfce7',
+              200: '#bbf7d0',
+              300: '#86efac',
+              400: '#4ade80',
+              500: '#22c55e',
+              600: '#16a34a',
+              700: '#15803d',
+              800: '#166534',
+              900: '#14532d',
+              950: '#052e16',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <script type="module" src="https://esm.sh/@noble/secp256k1@2.1.0"></script>
+  <script type="module" src="https://esm.sh/@noble/hashes@1.4.0/sha256"></script>
+  <script type="module" src="https://esm.sh/@noble/hashes@1.4.0/ripemd160"></script>
+    <style>
+    .loader {
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #22c55e;
+      border-radius: 50%;
+      width: 24px;
+      height: 24px;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body class="bg-gray-900 min-h-screen">
+  <div id="app"></div>
+
+  <script type="module">
+    import { h, render, Component } from 'https://esm.sh/preact@10.19.3';
+    import { useState, useEffect, useCallback } from 'https://esm.sh/preact@10.19.3/hooks';
+    import htm from 'https://esm.sh/htm@3.1.1';
+    import * as secp256k1 from 'https://esm.sh/@noble/secp256k1@2.1.0';
+    import { sha256 } from 'https://esm.sh/@noble/hashes@1.4.0/sha256';
+    import { ripemd160 } from 'https://esm.sh/@noble/hashes@1.4.0/ripemd160';
+    import QRCode from 'https://esm.sh/qrcode@1.5.3';
+
+    const html = htm.bind(h);
+
+    // ===== BITCOIN UTILITIES =====
+
+    const TESTNET4_PREFIX = 'tb';
+    const TESTNET4_WIF_PREFIX = 0xef;
+    const BECH32M_CONST = 0x2bc830a3;
+
+    // Bech32/Bech32m encoding
+    const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+    function bech32Polymod(values) {
+      const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+      let chk = 1;
+      for (const v of values) {
+        const b = chk >> 25;
+        chk = ((chk & 0x1ffffff) << 5) ^ v;
+        for (let i = 0; i < 5; i++) {
+          if ((b >> i) & 1) chk ^= GEN[i];
+        }
+      }
+      return chk;
+    }
+
+    function bech32HrpExpand(hrp) {
+      const ret = [];
+      for (const c of hrp) {
+        ret.push(c.charCodeAt(0) >> 5);
+      }
+      ret.push(0);
+      for (const c of hrp) {
+        ret.push(c.charCodeAt(0) & 31);
+      }
+      return ret;
+    }
+
+    function bech32CreateChecksum(hrp, data, spec) {
+      const values = bech32HrpExpand(hrp).concat(data).concat([0, 0, 0, 0, 0, 0]);
+      const polymod = bech32Polymod(values) ^ spec;
+      const ret = [];
+      for (let i = 0; i < 6; i++) {
+        ret.push((polymod >> (5 * (5 - i))) & 31);
+      }
+      return ret;
+    }
+
+    function bech32Encode(hrp, data, spec) {
+      const combined = data.concat(bech32CreateChecksum(hrp, data, spec));
+      let ret = hrp + '1';
+      for (const d of combined) {
+        ret += BECH32_CHARSET[d];
+      }
+      return ret;
+    }
+
+    function bech32Decode(str) {
+      const pos = str.lastIndexOf('1');
+      const hrp = str.slice(0, pos).toLowerCase();
+      const data = [];
+      for (let i = pos + 1; i < str.length; i++) {
+        const idx = BECH32_CHARSET.indexOf(str[i].toLowerCase());
+        if (idx === -1) return null;
+        data.push(idx);
+      }
+      return { hrp, data: data.slice(0, -6) };
+    }
+
+    function convertBits(data, fromBits, toBits, pad = true) {
+      let acc = 0;
+      let bits = 0;
+      const ret = [];
+      const maxv = (1 << toBits) - 1;
+      for (const value of data) {
+        acc = (acc << fromBits) | value;
+        bits += fromBits;
+        while (bits >= toBits) {
+          bits -= toBits;
+          ret.push((acc >> bits) & maxv);
+        }
+      }
+      if (pad) {
+        if (bits > 0) {
+          ret.push((acc << (toBits - bits)) & maxv);
+        }
+      }
+      return ret;
+    }
+
+    // Generate random bytes
+    function randomBytes(length) {
+      const bytes = new Uint8Array(length);
+      crypto.getRandomValues(bytes);
+      return bytes;
+    }
+
+    // Hex utilities
+    function bytesToHex(bytes) {
+      return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function hexToBytes(hex) {
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+      }
+      return bytes;
+    }
+
+    // Base58 encoding for WIF
+    const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+    function base58Encode(bytes) {
+      let num = BigInt('0x' + bytesToHex(bytes));
+      let result = '';
+      while (num > 0n) {
+        result = BASE58_ALPHABET[Number(num % 58n)] + result;
+        num = num / 58n;
+      }
+      for (const byte of bytes) {
+        if (byte === 0) result = '1' + result;
+        else break;
+      }
+      return result;
+    }
+
+    function base58Decode(str) {
+      let num = 0n;
+      for (const char of str) {
+        const idx = BASE58_ALPHABET.indexOf(char);
+        if (idx === -1) throw new Error('Invalid base58 character');
+        num = num * 58n + BigInt(idx);
+      }
+      let hex = num.toString(16);
+      if (hex.length % 2) hex = '0' + hex;
+      const bytes = hexToBytes(hex);
+      const leadingZeros = [];
+      for (const char of str) {
+        if (char === '1') leadingZeros.push(0);
+        else break;
+      }
+      return new Uint8Array([...leadingZeros, ...bytes]);
+    }
+
+    function base58CheckEncode(payload) {
+      const checksum = sha256(sha256(payload)).slice(0, 4);
+      return base58Encode(new Uint8Array([...payload, ...checksum]));
+    }
+
+    function base58CheckDecode(str) {
+      const bytes = base58Decode(str);
+      const payload = bytes.slice(0, -4);
+      const checksum = bytes.slice(-4);
+      const expectedChecksum = sha256(sha256(payload)).slice(0, 4);
+      for (let i = 0; i < 4; i++) {
+        if (checksum[i] !== expectedChecksum[i]) {
+          throw new Error('Invalid checksum');
+        }
+      }
+      return payload;
+    }
+
+    // Generate private key
+    function generatePrivateKey() {
+      return randomBytes(32);
+    }
+
+    // Get compressed public key from private key
+    function getPublicKey(privateKey) {
+      return secp256k1.getPublicKey(privateKey, true);
+    }
+
+    // Get x-only public key (32 bytes) for Taproot
+    function getXOnlyPubKey(privateKey) {
+      const pubKey = secp256k1.getPublicKey(privateKey, true);
+      return pubKey.slice(1); // Remove the prefix byte, keep only x-coordinate
+    }
+
+    // Tagged hash for Taproot (BIP340)
+    function taggedHash(tag, data) {
+      const tagHash = sha256(new TextEncoder().encode(tag));
+      return sha256(new Uint8Array([...tagHash, ...tagHash, ...data]));
+    }
+
+    // Compute taptweak for key-path spending (no script tree)
+    function computeTapTweak(xOnlyPubKey) {
+      return taggedHash('TapTweak', xOnlyPubKey);
+    }
+
+    // Tweak private key for Taproot signing
+    function tweakPrivateKey(privateKey) {
+      const pubKey = secp256k1.getPublicKey(privateKey, true);
+      const xOnlyPubKey = pubKey.slice(1);
+
+      // Check if pubkey has odd y-coordinate, if so negate the private key
+      let privKey = privateKey;
+      if (pubKey[0] === 0x03) {
+        // Negate private key: n - privKey where n is the curve order
+        const n = secp256k1.CURVE.n;
+        const privKeyBigInt = BigInt('0x' + bytesToHex(privateKey));
+        const negated = n - privKeyBigInt;
+        privKey = hexToBytes(negated.toString(16).padStart(64, '0'));
+      }
+
+      const tweak = computeTapTweak(xOnlyPubKey);
+      const tweakBigInt = BigInt('0x' + bytesToHex(tweak));
+      const privKeyBigInt = BigInt('0x' + bytesToHex(privKey));
+      const n = secp256k1.CURVE.n;
+      const tweakedPrivKey = (privKeyBigInt + tweakBigInt) % n;
+
+      return hexToBytes(tweakedPrivKey.toString(16).padStart(64, '0'));
+    }
+
+    // Get tweaked x-only public key for Taproot address
+    function getTweakedPubKey(privateKey) {
+      const pubKey = secp256k1.getPublicKey(privateKey, true);
+      let xOnlyPubKey = pubKey.slice(1);
+
+      // Lift x to point, ensuring even y
+      const tweak = computeTapTweak(xOnlyPubKey);
+      const tweakPoint = secp256k1.ProjectivePoint.BASE.multiply(BigInt('0x' + bytesToHex(tweak)));
+
+      // Get the internal public key point
+      let internalPoint = secp256k1.ProjectivePoint.fromHex(pubKey);
+
+      // If y is odd, negate the point
+      if (pubKey[0] === 0x03) {
+        internalPoint = internalPoint.negate();
+      }
+
+      // Add tweak point
+      const outputPoint = internalPoint.add(tweakPoint);
+      const outputPubKey = outputPoint.toRawBytes(true);
+
+      return outputPubKey.slice(1); // Return x-only
+    }
+
+    // Generate Taproot address (P2TR) for testnet4 using bech32m
+    function getTaprootAddress(privateKey) {
+      const tweakedPubKey = getTweakedPubKey(privateKey);
+      const words = [1].concat(convertBits(Array.from(tweakedPubKey), 8, 5)); // witness version 1
+      return bech32Encode(TESTNET4_PREFIX, words, BECH32M_CONST);
+    }
+
+    // Convert private key to WIF
+    function privateKeyToWIF(privateKey) {
+      const payload = new Uint8Array([TESTNET4_WIF_PREFIX, ...privateKey, 0x01]);
+      return base58CheckEncode(payload);
+    }
+
+    // Convert WIF to private key
+    function wifToPrivateKey(wif) {
+      const decoded = base58CheckDecode(wif);
+      if (decoded[0] !== TESTNET4_WIF_PREFIX) {
+        throw new Error('Invalid WIF prefix for testnet');
+      }
+      return decoded.slice(1, decoded[decoded.length - 1] === 0x01 ? -1 : decoded.length);
+    }
+
+    // ===== API FUNCTIONS =====
+
+    const API_BASE = 'https://mempool.space/testnet4/api';
+
+    async function fetchBalance(address) {
+      try {
+        const response = await fetch(`${API_BASE}/address/${address}`);
+        if (!response.ok) throw new Error('Failed to fetch balance');
+        const data = await response.json();
+        const confirmed = data.chain_stats.funded_txo_sum - data.chain_stats.spent_txo_sum;
+        const unconfirmed = data.mempool_stats.funded_txo_sum - data.mempool_stats.spent_txo_sum;
+        return { confirmed, unconfirmed, total: confirmed + unconfirmed };
+      } catch (error) {
+        console.error('Error fetching balance:', error);
+        return { confirmed: 0, unconfirmed: 0, total: 0 };
+      }
+    }
+
+    async function fetchTransactions(address) {
+      try {
+        const response = await fetch(`${API_BASE}/address/${address}/txs`);
+        if (!response.ok) throw new Error('Failed to fetch transactions');
+        return await response.json();
+      } catch (error) {
+        console.error('Error fetching transactions:', error);
+        return [];
+      }
+    }
+
+    async function fetchUTXOs(address) {
+      try {
+        const response = await fetch(`${API_BASE}/address/${address}/utxo`);
+        if (!response.ok) throw new Error('Failed to fetch UTXOs');
+        return await response.json();
+      } catch (error) {
+        console.error('Error fetching UTXOs:', error);
+        return [];
+      }
+    }
+
+    async function fetchFeeRates() {
+      try {
+        const response = await fetch(`${API_BASE}/v1/fees/recommended`);
+        if (!response.ok) throw new Error('Failed to fetch fee rates');
+        return await response.json();
+      } catch (error) {
+        console.error('Error fetching fee rates:', error);
+        return { fastestFee: 10, halfHourFee: 5, hourFee: 2, minimumFee: 1 };
+      }
+    }
+
+    async function broadcastTransaction(txHex) {
+      try {
+        const response = await fetch(`${API_BASE}/tx`, {
+          method: 'POST',
+          body: txHex
+        });
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(error);
+        }
+        return await response.text();
+      } catch (error) {
+        throw error;
+      }
+    }
+
+    // ===== TRANSACTION BUILDING =====
+
+    function varInt(n) {
+      if (n < 0xfd) return new Uint8Array([n]);
+      if (n <= 0xffff) return new Uint8Array([0xfd, n & 0xff, (n >> 8) & 0xff]);
+      if (n <= 0xffffffff) return new Uint8Array([0xfe, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff]);
+      throw new Error('Number too large for varInt');
+    }
+
+    function numberToLittleEndian(n, bytes) {
+      const result = new Uint8Array(bytes);
+      for (let i = 0; i < bytes; i++) {
+        result[i] = (n >> (8 * i)) & 0xff;
+      }
+      return result;
+    }
+
+    function bigintToLittleEndian(n, bytes) {
+      const result = new Uint8Array(bytes);
+      let temp = BigInt(n);
+      for (let i = 0; i < bytes; i++) {
+        result[i] = Number(temp & 0xffn);
+        temp = temp >> 8n;
+      }
+      return result;
+    }
+
+    function decodeAddress(address) {
+      if (address.startsWith('tb1') || address.startsWith('TB1')) {
+        const decoded = bech32Decode(address);
+        if (!decoded) throw new Error('Invalid bech32 address');
+        const witnessVersion = decoded.data[0];
+        const witnessProgram = convertBits(decoded.data.slice(1), 5, 8, false);
+
+        if (witnessVersion === 1 && witnessProgram.length === 32) {
+          return { type: 'p2tr', hash: new Uint8Array(witnessProgram), witnessVersion };
+        } else if (witnessVersion === 0 && witnessProgram.length === 20) {
+          return { type: 'p2wpkh', hash: new Uint8Array(witnessProgram), witnessVersion };
+        } else if (witnessVersion === 0 && witnessProgram.length === 32) {
+          return { type: 'p2wsh', hash: new Uint8Array(witnessProgram), witnessVersion };
+        }
+        throw new Error('Unknown witness program');
+      }
+      throw new Error('Unsupported address format');
+    }
+
+    function createOutputScript(address) {
+      const decoded = decodeAddress(address);
+      if (decoded.type === 'p2tr') {
+        // P2TR: OP_1 <32-byte-x-only-pubkey>
+        return new Uint8Array([0x51, 0x20, ...decoded.hash]);
+      } else if (decoded.type === 'p2wpkh') {
+        return new Uint8Array([0x00, 0x14, ...decoded.hash]);
+      } else if (decoded.type === 'p2wsh') {
+        return new Uint8Array([0x00, 0x20, ...decoded.hash]);
+      }
+      throw new Error('Unsupported address type');
+    }
+
+    async function createTransaction(privateKey, utxos, toAddress, amount, feeRate) {
+      const fromAddress = getTaprootAddress(privateKey);
+      const tweakedPubKey = getTweakedPubKey(privateKey);
+
+      // Select UTXOs
+      let totalInput = 0n;
+      const selectedUtxos = [];
+      const targetAmount = BigInt(amount);
+
+      // Sort UTXOs by value (largest first for efficiency)
+      const sortedUtxos = [...utxos].sort((a, b) => b.value - a.value);
+
+      for (const utxo of sortedUtxos) {
+        selectedUtxos.push(utxo);
+        totalInput += BigInt(utxo.value);
+        // Estimate fee: ~111 vbytes for 1-in-1-out P2TR, add ~58 for each additional input
+        const estimatedVbytes = 111 + (selectedUtxos.length - 1) * 58;
+        const estimatedFee = BigInt(estimatedVbytes * feeRate);
+        if (totalInput >= targetAmount + estimatedFee) break;
+      }
+
+      // Calculate fee (P2TR is more efficient than P2WPKH)
+      // 10.5 (overhead) + 57.5 per input + 43 per P2TR output
+      const vbytes = Math.ceil(10.5 + selectedUtxos.length * 57.5 + 2 * 43);
+      const fee = BigInt(vbytes * feeRate);
+      const change = totalInput - targetAmount - fee;
+
+      if (change < 0n) {
+        throw new Error('Insufficient funds');
+      }
+
+      // Build transaction
+      const outputs = [{ address: toAddress, value: targetAmount }];
+      if (change >= 330n) { // Taproot dust threshold is lower
+        outputs.push({ address: fromAddress, value: change });
+      }
+
+      // Serialize for signing
+      const version = numberToLittleEndian(2, 4);
+      const marker = new Uint8Array([0x00]);
+      const flag = new Uint8Array([0x01]);
+      const inputCount = varInt(selectedUtxos.length);
+      const outputCount = varInt(outputs.length);
+      const locktime = numberToLittleEndian(0, 4);
+
+      // Create inputs
+      const inputs = [];
+      for (const utxo of selectedUtxos) {
+        const txid = hexToBytes(utxo.txid).reverse();
+        const vout = numberToLittleEndian(utxo.vout, 4);
+        const scriptSig = new Uint8Array([0x00]); // Empty for segwit
+        const sequence = new Uint8Array([0xfd, 0xff, 0xff, 0xff]); // RBF enabled
+        inputs.push({ txid, vout, scriptSig, sequence, value: BigInt(utxo.value) });
+      }
+
+      // Create outputs
+      const outputsData = [];
+      for (const output of outputs) {
+        const script = createOutputScript(output.address);
+        outputsData.push({
+          value: bigintToLittleEndian(output.value, 8),
+          script
+        });
+      }
+
+      // Create prevout scripts for signing (P2TR scriptPubKey)
+      const prevoutScripts = inputs.map(() => {
+        return new Uint8Array([0x51, 0x20, ...tweakedPubKey]); // OP_1 <32-byte-pubkey>
+      });
+
+      // BIP341 Taproot sighash
+      // Precompute hash components
+      const hashPrevouts = sha256(new Uint8Array(inputs.flatMap(inp => [...inp.txid, ...inp.vout])));
+      const hashAmounts = sha256(new Uint8Array(inputs.flatMap(inp => [...bigintToLittleEndian(inp.value, 8)])));
+      const hashScriptPubkeys = sha256(new Uint8Array(prevoutScripts.flatMap(script => [script.length, ...script])));
+      const hashSequences = sha256(new Uint8Array(inputs.flatMap(inp => [...inp.sequence])));
+      const hashOutputs = sha256(new Uint8Array(outputsData.flatMap(out => [...out.value, out.script.length, ...out.script])));
+
+      // Sign each input with Schnorr
+      const witnesses = [];
+      const tweakedPrivKey = tweakPrivateKey(privateKey);
+
+      for (let i = 0; i < inputs.length; i++) {
+        // BIP341 signature hash
+        const sigHashType = 0x00; // SIGHASH_DEFAULT (same as SIGHASH_ALL for taproot)
+
+        const sigMsg = new Uint8Array([
+          0x00, // hash_type epoch
+          sigHashType, // sighash type
+          ...version,
+          ...locktime,
+          ...hashPrevouts,
+          ...hashAmounts,
+          ...hashScriptPubkeys,
+          ...hashSequences,
+          ...hashOutputs,
+          0x00, // spend_type (key path, no annex)
+          ...numberToLittleEndian(i, 4), // input index
+        ]);
+
+        const sighash = taggedHash('TapSighash', sigMsg);
+
+        // Sign with Schnorr using tweaked private key
+        const signature = secp256k1.schnorr.sign(sighash, tweakedPrivKey);
+
+        // For SIGHASH_DEFAULT, we don't append the hash type byte
+        witnesses.push([signature]);
+      }
+
+      // Serialize final transaction
+      const txParts = [
+        version,
+        marker,
+        flag,
+        inputCount
+      ];
+
+      for (const input of inputs) {
+        txParts.push(input.txid, input.vout, input.scriptSig, input.sequence);
+      }
+
+      txParts.push(outputCount);
+
+      for (const output of outputsData) {
+        txParts.push(output.value, new Uint8Array([output.script.length]), output.script);
+      }
+
+      for (const witness of witnesses) {
+        txParts.push(varInt(witness.length));
+        for (const item of witness) {
+          txParts.push(varInt(item.length), item);
+        }
+      }
+
+      txParts.push(locktime);
+
+      const txBytes = new Uint8Array(txParts.reduce((acc, part) => acc + part.length, 0));
+      let offset = 0;
+      for (const part of txParts) {
+        txBytes.set(part, offset);
+        offset += part.length;
+      }
+
+      return {
+        hex: bytesToHex(txBytes),
+        fee: Number(fee),
+        totalInput: Number(totalInput),
+        amount: Number(targetAmount)
+      };
+    }
+
+    // ===== WALLET STORAGE =====
+
+    function saveWallet(wallet) {
+      localStorage.setItem('testnet4_wallet', JSON.stringify(wallet));
+    }
+
+    function loadWallet() {
+      const data = localStorage.getItem('testnet4_wallet');
+      return data ? JSON.parse(data) : null;
+    }
+
+    function clearWallet() {
+      localStorage.removeItem('testnet4_wallet');
+    }
+
+    // ===== REACT COMPONENTS =====
+
+    function App() {
+      const [wallet, setWallet] = useState(null);
+      const [view, setView] = useState('home');
+      const [balance, setBalance] = useState({ confirmed: 0, unconfirmed: 0, total: 0 });
+      const [transactions, setTransactions] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [notification, setNotification] = useState(null);
+
+      useEffect(() => {
+        const savedWallet = loadWallet();
+        if (savedWallet) {
+          setWallet(savedWallet);
+        }
+      }, []);
+
+      useEffect(() => {
+        if (wallet) {
+          refreshData();
+        }
+      }, [wallet]);
+
+      const showNotification = (message, type = 'info') => {
+        setNotification({ message, type });
+        setTimeout(() => setNotification(null), 5000);
+      };
+
+      const refreshData = async () => {
+        if (!wallet) return;
+        setLoading(true);
+        try {
+          const [bal, txs] = await Promise.all([
+            fetchBalance(wallet.address),
+            fetchTransactions(wallet.address)
+          ]);
+          setBalance(bal);
+          setTransactions(txs);
+        } catch (error) {
+          showNotification('Error refreshing data', 'error');
+        }
+        setLoading(false);
+      };
+
+      const createNewWallet = () => {
+        const privateKey = generatePrivateKey();
+        const publicKey = getPublicKey(privateKey);
+        const xOnlyPubKey = getXOnlyPubKey(privateKey);
+        const address = getTaprootAddress(privateKey);
+        const wif = privateKeyToWIF(privateKey);
+
+        const newWallet = {
+          privateKey: bytesToHex(privateKey),
+          publicKey: bytesToHex(publicKey),
+          xOnlyPubKey: bytesToHex(xOnlyPubKey),
+          address,
+          wif
+        };
+
+        setWallet(newWallet);
+        saveWallet(newWallet);
+        showNotification('New Taproot wallet created!', 'success');
+        setView('home');
+      };
+
+      const importWallet = (input) => {
+        try {
+          const trimmed = input.trim();
+          let privateKey;
+
+          // Check if it's a 64-char hex string (32 bytes)
+          if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+            privateKey = hexToBytes(trimmed);
+          } else {
+            // Try WIF format
+            privateKey = wifToPrivateKey(trimmed);
+          }
+
+          const publicKey = getPublicKey(privateKey);
+          const xOnlyPubKey = getXOnlyPubKey(privateKey);
+          const address = getTaprootAddress(privateKey);
+          const wif = privateKeyToWIF(privateKey);
+
+          const newWallet = {
+            privateKey: bytesToHex(privateKey),
+            publicKey: bytesToHex(publicKey),
+            xOnlyPubKey: bytesToHex(xOnlyPubKey),
+            address,
+            wif
+          };
+
+          setWallet(newWallet);
+          saveWallet(newWallet);
+          showNotification('Wallet imported successfully!', 'success');
+          setView('home');
+        } catch (error) {
+          showNotification('Invalid private key (use 64-char hex or WIF)', 'error');
+        }
+      };
+
+      const logout = () => {
+        clearWallet();
+        setWallet(null);
+        setBalance({ confirmed: 0, unconfirmed: 0, total: 0 });
+        setTransactions([]);
+        setView('home');
+        showNotification('Wallet disconnected', 'info');
+      };
+
+      const formatSats = (sats) => {
+        return (sats / 100000000).toFixed(8);
+      };
+
+      const formatDate = (timestamp) => {
+        if (!timestamp) return 'Pending';
+        return new Date(timestamp * 1000).toLocaleString();
+      };
+
+      const truncateHash = (hash, chars = 8) => {
+        return `${hash.slice(0, chars)}...${hash.slice(-chars)}`;
+      };
+
+      return html`
+        <div class="min-h-screen bg-gradient-to-b from-gray-900 to-gray-800">
+          ${notification && html`
+            <div class="fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg ${
+              notification.type === 'success' ? 'bg-primary-600' :
+              notification.type === 'error' ? 'bg-red-600' : 'bg-gray-700'
+            } text-white font-medium animate-pulse">
+              ${notification.message}
+            </div>
+          `}
+
+          <${Header} wallet=${wallet} onLogout=${logout} onRefresh=${refreshData} loading=${loading} />
+
+          <main class="container mx-auto px-4 py-8 max-w-4xl">
+            ${!wallet ? html`
+              <${WelcomeScreen} onCreateWallet=${createNewWallet} onImportWallet=${importWallet} />
+            ` : html`
+              <${Navigation} view=${view} setView=${setView} />
+
+              ${view === 'home' && html`
+                <${Dashboard}
+                  wallet=${wallet}
+                  balance=${balance}
+                  transactions=${transactions}
+                  formatSats=${formatSats}
+                  formatDate=${formatDate}
+                  truncateHash=${truncateHash}
+                  onRefresh=${refreshData}
+                  loading=${loading}
+                />
+              `}
+
+              ${view === 'send' && html`
+                <${SendView}
+                  wallet=${wallet}
+                  balance=${balance}
+                  formatSats=${formatSats}
+                  showNotification=${showNotification}
+                  onRefresh=${refreshData}
+                />
+              `}
+
+              ${view === 'receive' && html`
+                <${ReceiveView} wallet=${wallet} />
+              `}
+
+              ${view === 'history' && html`
+                <${HistoryView}
+                  wallet=${wallet}
+                  transactions=${transactions}
+                  formatSats=${formatSats}
+                  formatDate=${formatDate}
+                  truncateHash=${truncateHash}
+                />
+              `}
+
+              ${view === 'settings' && html`
+                <${SettingsView} wallet=${wallet} onLogout=${logout} />
+              `}
+            `}
+          </main>
+
+          <${Footer} />
+        </div>
+      `;
+    }
+
+    function Header({ wallet, onLogout, onRefresh, loading }) {
+      return html`
+        <header class="bg-gray-800/50 backdrop-blur-sm border-b border-gray-700 sticky top-0 z-40">
+          <div class="container mx-auto px-4 py-4 max-w-4xl">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-primary-600 rounded-full flex items-center justify-center">
+                  <svg class="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                  </svg>
+                </div>
+                <div>
+                  <h1 class="text-xl font-bold text-white">Taproot Wallet</h1>
+                  <p class="text-xs text-primary-400">Bitcoin Testnet4</p>
+                </div>
+              </div>
+              ${wallet && html`
+                <div class="flex items-center gap-2">
+                  <button
+                    onClick=${onRefresh}
+                    disabled=${loading}
+                    class="p-2 text-gray-400 hover:text-primary-400 transition-colors disabled:opacity-50"
+                    title="Refresh"
+                  >
+                    ${loading ? html`<div class="loader"></div>` : html`
+                      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    `}
+                  </button>
+                </div>
+              `}
+            </div>
+          </div>
+        </header>
+      `;
+    }
+
+    function Navigation({ view, setView }) {
+      const tabs = [
+        { id: 'home', label: 'Home', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
+        { id: 'send', label: 'Send', icon: 'M12 19l9 2-9-18-9 18 9-2zm0 0v-8' },
+        { id: 'receive', label: 'Receive', icon: 'M12 4v16m8-8H4' },
+        { id: 'history', label: 'History', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
+        { id: 'settings', label: 'Settings', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' }
+      ];
+
+      return html`
+        <nav class="flex justify-center mb-8">
+          <div class="bg-gray-800 rounded-xl p-1 flex gap-1">
+            ${tabs.map(tab => html`
+              <button
+                key=${tab.id}
+                onClick=${() => setView(tab.id)}
+                class="flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${
+                  view === tab.id
+                    ? 'bg-primary-600 text-white'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                }"
+              >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d=${tab.icon} />
+                </svg>
+                <span class="hidden sm:inline">${tab.label}</span>
+              </button>
+            `)}
+          </div>
+        </nav>
+      `;
+    }
+
+    function WelcomeScreen({ onCreateWallet, onImportWallet }) {
+      const [showImport, setShowImport] = useState(false);
+      const [wifInput, setWifInput] = useState('');
+
+      return html`
+        <div class="flex flex-col items-center justify-center min-h-[60vh]">
+          <div class="text-center mb-12">
+            <div class="w-24 h-24 bg-primary-600 rounded-full flex items-center justify-center mx-auto mb-6">
+              <svg class="w-14 h-14 text-white" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+              </svg>
+            </div>
+            <h2 class="text-3xl font-bold text-white mb-3">Bitcoin Testnet4 Taproot Wallet</h2>
+            <p class="text-gray-400 max-w-md">
+              A secure, client-side Bitcoin wallet for Testnet4. Your keys never leave your browser.
+            </p>
+          </div>
+
+          ${!showImport ? html`
+            <div class="flex flex-col sm:flex-row gap-4">
+              <button
+                onClick=${onCreateWallet}
+                class="px-8 py-4 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-xl transition-colors flex items-center gap-3"
+              >
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
+                Create New Wallet
+              </button>
+              <button
+                onClick=${() => setShowImport(true)}
+                class="px-8 py-4 bg-gray-700 hover:bg-gray-600 text-white font-semibold rounded-xl transition-colors flex items-center gap-3"
+              >
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                Import Wallet
+              </button>
+            </div>
+          ` : html`
+            <div class="w-full max-w-md bg-gray-800 rounded-xl p-6">
+              <h3 class="text-lg font-semibold text-white mb-4">Import Wallet</h3>
+              <div class="space-y-4">
+                <div>
+                  <label class="block text-sm text-gray-400 mb-2">Private Key (Hex or WIF)</label>
+                  <input
+                    type="password"
+                    value=${wifInput}
+                    onInput=${(e) => setWifInput(e.target.value)}
+                    placeholder="64-char hex (Nostr nsec) or WIF..."
+                    class="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-primary-500"
+                  />
+                  <p class="text-gray-500 text-xs mt-1">Supports 64-char hex (same as Nostr) or WIF format</p>
+                </div>
+                <div class="flex gap-3">
+                  <button
+                    onClick=${() => onImportWallet(wifInput)}
+                    disabled=${!wifInput}
+                    class="flex-1 py-3 bg-primary-600 hover:bg-primary-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors"
+                  >
+                    Import
+                  </button>
+                  <button
+                    onClick=${() => { setShowImport(false); setWifInput(''); }}
+                    class="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white font-semibold rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          `}
+
+          <div class="mt-12 p-4 bg-yellow-900/30 border border-yellow-700/50 rounded-lg max-w-md">
+            <p class="text-yellow-400 text-sm text-center">
+              <strong>Testnet4 Only:</strong> This wallet is for Bitcoin Testnet4. Coins have no real value.
+            </p>
+          </div>
+        </div>
+      `;
+    }
+
+    function Dashboard({ wallet, balance, transactions, formatSats, formatDate, truncateHash, onRefresh, loading }) {
+      return html`
+        <div class="space-y-6">
+          <!-- Balance Card -->
+          <div class="bg-gradient-to-br from-primary-900 to-primary-800 rounded-2xl p-6 shadow-xl">
+            <div class="text-center">
+              <p class="text-primary-200 text-sm mb-1">Total Balance</p>
+              <h2 class="text-4xl font-bold text-white mb-2">${formatSats(balance.total)} BTC</h2>
+              <p class="text-primary-300 text-sm">${balance.total.toLocaleString()} sats</p>
+            </div>
+            <div class="grid grid-cols-2 gap-4 mt-6 pt-6 border-t border-primary-700">
+              <div class="text-center">
+                <p class="text-primary-300 text-xs">Confirmed</p>
+                <p class="text-white font-medium">${formatSats(balance.confirmed)} BTC</p>
+              </div>
+              <div class="text-center">
+                <p class="text-primary-300 text-xs">Pending</p>
+                <p class="text-white font-medium">${formatSats(balance.unconfirmed)} BTC</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Address Card -->
+          <div class="bg-gray-800 rounded-xl p-4">
+            <p class="text-gray-400 text-xs mb-2">Your Taproot Address</p>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 text-primary-400 text-sm bg-gray-900 px-3 py-2 rounded-lg overflow-hidden text-ellipsis">
+                ${wallet.address}
+              </code>
+              <button
+                onClick=${() => { navigator.clipboard.writeText(wallet.address); }}
+                class="p-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+                title="Copy address"
+              >
+                <svg class="w-5 h-5 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Recent Transactions -->
+          <div class="bg-gray-800 rounded-xl p-6">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-lg font-semibold text-white">Recent Activity</h3>
+              ${loading && html`<div class="loader"></div>`}
+            </div>
+            ${transactions.length === 0 ? html`
+              <div class="text-center py-8">
+                <svg class="w-12 h-12 text-gray-600 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+                <p class="text-gray-500">No transactions yet</p>
+                <p class="text-gray-600 text-sm mt-1">Get testnet coins from a faucet</p>
+              </div>
+            ` : html`
+              <div class="space-y-3">
+                ${transactions.slice(0, 5).map(tx => {
+                  const isIncoming = tx.vout.some(v => v.scriptpubkey_address === wallet.address);
+                  const isOutgoing = tx.vin.some(v => v.prevout?.scriptpubkey_address === wallet.address);
+                  const type = isOutgoing ? 'sent' : 'received';
+
+                  let amount = 0;
+                  if (type === 'received') {
+                    amount = tx.vout.filter(v => v.scriptpubkey_address === wallet.address).reduce((sum, v) => sum + v.value, 0);
+                  } else {
+                    const inputAmount = tx.vin.filter(v => v.prevout?.scriptpubkey_address === wallet.address).reduce((sum, v) => sum + v.prevout.value, 0);
+                    const changeAmount = tx.vout.filter(v => v.scriptpubkey_address === wallet.address).reduce((sum, v) => sum + v.value, 0);
+                    amount = inputAmount - changeAmount;
+                  }
+
+                  return html`
+                    <div class="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
+                      <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-full flex items-center justify-center ${type === 'received' ? 'bg-primary-900' : 'bg-red-900'}">
+                          <svg class="w-5 h-5 ${type === 'received' ? 'text-primary-400' : 'text-red-400'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d=${type === 'received' ? 'M19 14l-7 7m0 0l-7-7m7 7V3' : 'M5 10l7-7m0 0l7 7m-7-7v18'} />
+                          </svg>
+                        </div>
+                        <div>
+                          <p class="text-white font-medium capitalize">${type}</p>
+                          <p class="text-gray-500 text-xs">${formatDate(tx.status.block_time)}</p>
+                        </div>
+                      </div>
+                      <div class="text-right">
+                        <p class="font-medium ${type === 'received' ? 'text-primary-400' : 'text-red-400'}">
+                          ${type === 'received' ? '+' : '-'}${formatSats(amount)} BTC
+                        </p>
+                        <a
+                          href="https://mempool.space/testnet4/tx/${tx.txid}"
+                          target="_blank"
+                          class="text-gray-500 text-xs hover:text-primary-400"
+                        >
+                          ${truncateHash(tx.txid, 6)}
+                        </a>
+                      </div>
+                    </div>
+                  `;
+                })}
+              </div>
+            `}
+          </div>
+
+          <!-- Faucet Info -->
+          <div class="bg-gray-800 rounded-xl p-6">
+            <h3 class="text-lg font-semibold text-white mb-3">Get Test Coins</h3>
+            <p class="text-gray-400 text-sm mb-4">
+              Need testnet coins? Use a Testnet4 faucet to get free test BTC.
+            </p>
+            <a
+              href="https://coinfaucet.eu/en/btc-testnet4/"
+              target="_blank"
+              class="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-colors"
+            >
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+              Open Testnet4 Faucet
+            </a>
+          </div>
+        </div>
+      `;
+    }
+
+    function SendView({ wallet, balance, formatSats, showNotification, onRefresh }) {
+      const [recipient, setRecipient] = useState('');
+      const [amount, setAmount] = useState('');
+      const [feeRate, setFeeRate] = useState(5);
+      const [feeRates, setFeeRates] = useState(null);
+      const [sending, setSending] = useState(false);
+      const [txResult, setTxResult] = useState(null);
+
+      useEffect(() => {
+        fetchFeeRates().then(setFeeRates);
+      }, []);
+
+      const handleSend = async () => {
+        if (!recipient || !amount) {
+          showNotification('Please fill in all fields', 'error');
+          return;
+        }
+
+        const satsAmount = Math.floor(parseFloat(amount) * 100000000);
+        if (satsAmount <= 0 || satsAmount > balance.total) {
+          showNotification('Invalid amount', 'error');
+          return;
+        }
+
+        setSending(true);
+        try {
+          const utxos = await fetchUTXOs(wallet.address);
+          if (utxos.length === 0) {
+            throw new Error('No UTXOs available');
+          }
+
+          const privateKey = hexToBytes(wallet.privateKey);
+          const tx = await createTransaction(privateKey, utxos, recipient, satsAmount, feeRate);
+
+          const txid = await broadcastTransaction(tx.hex);
+          setTxResult({ txid, amount: satsAmount, fee: tx.fee });
+          showNotification('Transaction sent successfully!', 'success');
+          setRecipient('');
+          setAmount('');
+          onRefresh();
+        } catch (error) {
+          console.error('Send error:', error);
+          showNotification(`Error: ${error.message}`, 'error');
+        }
+        setSending(false);
+      };
+
+      const setMaxAmount = () => {
+        // Leave some for fee
+        const maxSats = balance.total - (feeRate * 200);
+        if (maxSats > 0) {
+          setAmount((maxSats / 100000000).toFixed(8));
+        }
+      };
+
+      return html`
+        <div class="max-w-lg mx-auto">
+          <div class="bg-gray-800 rounded-xl p-6">
+            <h3 class="text-xl font-semibold text-white mb-6">Send Bitcoin</h3>
+
+            ${txResult ? html`
+              <div class="bg-primary-900/50 border border-primary-700 rounded-lg p-6 text-center">
+                <svg class="w-16 h-16 text-primary-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <h4 class="text-lg font-semibold text-white mb-2">Transaction Sent!</h4>
+                <p class="text-gray-400 mb-4">${formatSats(txResult.amount)} BTC sent</p>
+                <p class="text-gray-500 text-sm mb-4">Fee: ${txResult.fee} sats</p>
+                <a
+                  href="https://mempool.space/testnet4/tx/${txResult.txid}"
+                  target="_blank"
+                  class="text-primary-400 hover:text-primary-300 text-sm break-all"
+                >
+                  ${txResult.txid}
+                </a>
+                <button
+                  onClick=${() => setTxResult(null)}
+                  class="mt-6 w-full py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
+                >
+                  Send Another
+                </button>
+              </div>
+            ` : html`
+              <div class="space-y-5">
+                <div>
+                  <label class="block text-sm text-gray-400 mb-2">Recipient Address</label>
+                  <input
+                    type="text"
+                    value=${recipient}
+                    onInput=${(e) => setRecipient(e.target.value)}
+                    placeholder="tb1p... or tb1q..."
+                    class="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-primary-500"
+                  />
+                </div>
+
+                <div>
+                  <label class="block text-sm text-gray-400 mb-2">Amount (BTC)</label>
+                  <div class="relative">
+                    <input
+                      type="number"
+                      step="0.00000001"
+                      value=${amount}
+                      onInput=${(e) => setAmount(e.target.value)}
+                      placeholder="0.00000000"
+                      class="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 pr-20"
+                    />
+                    <button
+                      onClick=${setMaxAmount}
+                      class="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-primary-600 hover:bg-primary-700 text-white text-sm rounded transition-colors"
+                    >
+                      MAX
+                    </button>
+                  </div>
+                  <p class="text-gray-500 text-xs mt-1">
+                    Available: ${formatSats(balance.total)} BTC
+                  </p>
+                </div>
+
+                <div>
+                  <label class="block text-sm text-gray-400 mb-2">Fee Rate (sat/vB)</label>
+                  <div class="grid grid-cols-3 gap-2 mb-2">
+                    ${feeRates && html`
+                      <button
+                        onClick=${() => setFeeRate(feeRates.hourFee)}
+                        class="py-2 px-3 rounded-lg text-sm ${feeRate === feeRates.hourFee ? 'bg-primary-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
+                      >
+                        Slow (${feeRates.hourFee})
+                      </button>
+                      <button
+                        onClick=${() => setFeeRate(feeRates.halfHourFee)}
+                        class="py-2 px-3 rounded-lg text-sm ${feeRate === feeRates.halfHourFee ? 'bg-primary-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
+                      >
+                        Normal (${feeRates.halfHourFee})
+                      </button>
+                      <button
+                        onClick=${() => setFeeRate(feeRates.fastestFee)}
+                        class="py-2 px-3 rounded-lg text-sm ${feeRate === feeRates.fastestFee ? 'bg-primary-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
+                      >
+                        Fast (${feeRates.fastestFee})
+                      </button>
+                    `}
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="50"
+                    value=${feeRate}
+                    onInput=${(e) => setFeeRate(parseInt(e.target.value))}
+                    class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-primary-500"
+                  />
+                  <p class="text-gray-500 text-xs mt-1">Current: ${feeRate} sat/vB</p>
+                </div>
+
+                <button
+                  onClick=${handleSend}
+                  disabled=${sending || !recipient || !amount}
+                  class="w-full py-4 bg-primary-600 hover:bg-primary-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors flex items-center justify-center gap-2"
+                >
+                  ${sending ? html`
+                    <div class="loader"></div>
+                    <span>Sending...</span>
+                  ` : html`
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                    </svg>
+                    <span>Send Bitcoin</span>
+                  `}
+                </button>
+              </div>
+            `}
+          </div>
+        </div>
+      `;
+    }
+
+    function ReceiveView({ wallet }) {
+      const [copied, setCopied] = useState(false);
+      const qrCanvasRef = useCallback((node) => {
+        if (node && wallet?.address) {
+          QRCode.toCanvas(node, wallet.address, {
+            width: 200,
+            margin: 2,
+            color: {
+              dark: '#22c55e',
+              light: '#1f2937'
+            }
+          });
+        }
+      }, [wallet?.address]);
+
+      const copyAddress = () => {
+        navigator.clipboard.writeText(wallet.address);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      };
+
+      return html`
+        <div class="max-w-lg mx-auto">
+          <div class="bg-gray-800 rounded-xl p-6 text-center">
+            <h3 class="text-xl font-semibold text-white mb-6">Receive Bitcoin</h3>
+
+            <div class="bg-gray-900 rounded-xl p-6 inline-block mb-6">
+              <canvas ref=${qrCanvasRef}></canvas>
+            </div>
+
+            <div class="bg-gray-900 rounded-lg p-4 mb-4">
+              <p class="text-gray-400 text-xs mb-2">Your Taproot Address (tb1p...)</p>
+              <code class="text-primary-400 text-sm break-all">${wallet.address}</code>
+            </div>
+
+            <button
+              onClick=${copyAddress}
+              class="w-full py-3 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+            >
+              ${copied ? html`
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                <span>Copied!</span>
+              ` : html`
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+                <span>Copy Address</span>
+              `}
+            </button>
+
+            <p class="text-gray-500 text-sm mt-4">
+              Share this Taproot address to receive Testnet4 Bitcoin
+            </p>
+          </div>
+        </div>
+      `;
+    }
+
+    function HistoryView({ wallet, transactions, formatSats, formatDate, truncateHash }) {
+      return html`
+        <div class="bg-gray-800 rounded-xl p-6">
+          <h3 class="text-xl font-semibold text-white mb-6">Transaction History</h3>
+
+          ${transactions.length === 0 ? html`
+            <div class="text-center py-12">
+              <svg class="w-16 h-16 text-gray-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+              </svg>
+              <p class="text-gray-400 text-lg">No transactions yet</p>
+              <p class="text-gray-500 text-sm mt-2">Your transaction history will appear here</p>
+            </div>
+          ` : html`
+            <div class="space-y-4">
+              ${transactions.map(tx => {
+                const isOutgoing = tx.vin.some(v => v.prevout?.scriptpubkey_address === wallet.address);
+                const type = isOutgoing ? 'sent' : 'received';
+
+                let amount = 0;
+                if (type === 'received') {
+                  amount = tx.vout.filter(v => v.scriptpubkey_address === wallet.address).reduce((sum, v) => sum + v.value, 0);
+                } else {
+                  const inputAmount = tx.vin.filter(v => v.prevout?.scriptpubkey_address === wallet.address).reduce((sum, v) => sum + v.prevout.value, 0);
+                  const changeAmount = tx.vout.filter(v => v.scriptpubkey_address === wallet.address).reduce((sum, v) => sum + v.value, 0);
+                  amount = inputAmount - changeAmount;
+                }
+
+                return html`
+                  <div class="bg-gray-900 rounded-lg p-4">
+                    <div class="flex items-center justify-between mb-3">
+                      <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-full flex items-center justify-center ${type === 'received' ? 'bg-primary-900' : 'bg-red-900'}">
+                          <svg class="w-5 h-5 ${type === 'received' ? 'text-primary-400' : 'text-red-400'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d=${type === 'received' ? 'M19 14l-7 7m0 0l-7-7m7 7V3' : 'M5 10l7-7m0 0l7 7m-7-7v18'} />
+                          </svg>
+                        </div>
+                        <div>
+                          <p class="text-white font-medium capitalize">${type}</p>
+                          <p class="text-gray-500 text-sm">${formatDate(tx.status.block_time)}</p>
+                        </div>
+                      </div>
+                      <div class="text-right">
+                        <p class="text-lg font-semibold ${type === 'received' ? 'text-primary-400' : 'text-red-400'}">
+                          ${type === 'received' ? '+' : '-'}${formatSats(amount)} BTC
+                        </p>
+                        <p class="text-gray-500 text-sm">
+                          ${tx.status.confirmed ? html`
+                            <span class="text-primary-400">Confirmed</span>
+                          ` : html`
+                            <span class="text-yellow-400">Pending</span>
+                          `}
+                        </p>
+                      </div>
+                    </div>
+                    <div class="pt-3 border-t border-gray-800">
+                      <div class="flex items-center justify-between">
+                        <span class="text-gray-500 text-sm">Transaction ID</span>
+                        <a
+                          href="https://mempool.space/testnet4/tx/${tx.txid}"
+                          target="_blank"
+                          class="text-primary-400 hover:text-primary-300 text-sm"
+                        >
+                          ${truncateHash(tx.txid)} ↗
+                        </a>
+                      </div>
+                      ${tx.status.confirmed && html`
+                        <div class="flex items-center justify-between mt-2">
+                          <span class="text-gray-500 text-sm">Block</span>
+                          <span class="text-gray-400 text-sm">${tx.status.block_height}</span>
+                        </div>
+                      `}
+                      <div class="flex items-center justify-between mt-2">
+                        <span class="text-gray-500 text-sm">Fee</span>
+                        <span class="text-gray-400 text-sm">${tx.fee} sats</span>
+                      </div>
+                    </div>
+                  </div>
+                `;
+              })}
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    function SettingsView({ wallet, onLogout }) {
+      const [showPrivateKey, setShowPrivateKey] = useState(false);
+      const [showWIF, setShowWIF] = useState(false);
+
+      const copyToClipboard = (text) => {
+        navigator.clipboard.writeText(text);
+      };
+
+      return html`
+        <div class="max-w-lg mx-auto space-y-6">
+          <div class="bg-gray-800 rounded-xl p-6">
+            <h3 class="text-xl font-semibold text-white mb-6">Wallet Settings</h3>
+
+            <div class="space-y-4">
+              <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-gray-400 text-sm">Address</span>
+                  <button
+                    onClick=${() => copyToClipboard(wallet.address)}
+                    class="text-primary-400 hover:text-primary-300 text-sm"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <code class="text-white text-sm break-all">${wallet.address}</code>
+              </div>
+
+              <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-gray-400 text-sm">X-Only Public Key (Nostr npub)</span>
+                  <button
+                    onClick=${() => copyToClipboard(wallet.xOnlyPubKey || wallet.publicKey.slice(2))}
+                    class="text-primary-400 hover:text-primary-300 text-sm"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <code class="text-white text-xs break-all">${wallet.xOnlyPubKey || wallet.publicKey.slice(2)}</code>
+              </div>
+
+              <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-gray-400 text-sm">Compressed Public Key</span>
+                  <button
+                    onClick=${() => copyToClipboard(wallet.publicKey)}
+                    class="text-primary-400 hover:text-primary-300 text-sm"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <code class="text-white text-xs break-all">${wallet.publicKey}</code>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-red-900/30 border border-red-800 rounded-xl p-6">
+            <h3 class="text-lg font-semibold text-red-400 mb-4">Private Key Backup</h3>
+            <p class="text-gray-400 text-sm mb-4">
+              Keep your private key safe. Anyone with access to it can spend your funds. The hex format is compatible with Nostr.
+            </p>
+
+            <div class="space-y-4">
+              <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-gray-400 text-sm">Hex Private Key (Nostr compatible)</span>
+                  <div class="flex gap-2">
+                    <button
+                      onClick=${() => setShowPrivateKey(!showPrivateKey)}
+                      class="text-primary-400 hover:text-primary-300 text-sm"
+                    >
+                      ${showPrivateKey ? 'Hide' : 'Show'}
+                    </button>
+                    ${showPrivateKey && html`
+                      <button
+                        onClick=${() => copyToClipboard(wallet.privateKey)}
+                        class="text-primary-400 hover:text-primary-300 text-sm"
+                      >
+                        Copy
+                      </button>
+                    `}
+                  </div>
+                </div>
+                ${showPrivateKey ? html`
+                  <code class="text-red-400 text-sm break-all">${wallet.privateKey}</code>
+                ` : html`
+                  <code class="text-gray-600 text-sm">••••••••••••••••••••••••••••••••</code>
+                `}
+              </div>
+
+              <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-gray-400 text-sm">WIF Private Key (Bitcoin)</span>
+                  <div class="flex gap-2">
+                    <button
+                      onClick=${() => setShowWIF(!showWIF)}
+                      class="text-primary-400 hover:text-primary-300 text-sm"
+                    >
+                      ${showWIF ? 'Hide' : 'Show'}
+                    </button>
+                    ${showWIF && html`
+                      <button
+                        onClick=${() => copyToClipboard(wallet.wif)}
+                        class="text-primary-400 hover:text-primary-300 text-sm"
+                      >
+                        Copy
+                      </button>
+                    `}
+                  </div>
+                </div>
+                ${showWIF ? html`
+                  <code class="text-red-400 text-xs break-all">${wallet.wif}</code>
+                ` : html`
+                  <code class="text-gray-600 text-sm">••••••••••••••••••••••••••••••••</code>
+                `}
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-gray-800 rounded-xl p-6">
+            <h3 class="text-lg font-semibold text-white mb-4">Danger Zone</h3>
+            <p class="text-gray-400 text-sm mb-4">
+              Disconnecting will remove the wallet from this device. Make sure you have backed up your private key.
+            </p>
+            <button
+              onClick=${onLogout}
+              class="w-full py-3 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+            >
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              Disconnect Wallet
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function Footer() {
+      return html`
+        <footer class="border-t border-gray-800 mt-12">
+          <div class="container mx-auto px-4 py-6 max-w-4xl">
+            <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
+              <p class="text-gray-500 text-sm">
+                Bitcoin Testnet4 Taproot Wallet - For testing purposes only
+              </p>
+              <div class="flex gap-4">
+                <a
+                  href="https://mempool.space/testnet4"
+                  target="_blank"
+                  class="text-gray-500 hover:text-primary-400 text-sm"
+                >
+                  Block Explorer
+                </a>
+                <a
+                  href="https://coinfaucet.eu/en/btc-testnet4/"
+                  target="_blank"
+                  class="text-gray-500 hover:text-primary-400 text-sm"
+                >
+                  Faucet
+                </a>
+              </div>
+            </div>
+          </div>
+        </footer>
+      `;
+    }
+
+    // Mount the app
+    render(html`<${App} />`, document.getElementById('app'));
+  </script>
+</body>
+</html>
