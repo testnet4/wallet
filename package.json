@@ -1,0 +1,12 @@
+{
+  "name": "testnet4-wallet",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@noble/curves": "1.4.0",
+    "@noble/hashes": "1.4.0"
+  }
+}

@@ -1,0 +1,38 @@
+[
+  {
+    "privkey": "5d8d968d71c0dfa9accdb218c19cc421eba30592c50896005357a72608dcbb85",
+    "nsec": "nsec1tkxedrt3cr06ntxdkgvvr8xyy846xpvjc5yfvqzn27njvzxuhwzse22yv9",
+    "pubkey": "73f8c7b5dbd162ea10a6a44aa69177085b4ec42e536ef780969a1f0e61b5527a",
+    "didnostr": "did:nostr:73f8c7b5dbd162ea10a6a44aa69177085b4ec42e536ef780969a1f0e61b5527a",
+    "pubkeycompressed": "0273f8c7b5dbd162ea10a6a44aa69177085b4ec42e536ef780969a1f0e61b5527a",
+    "npub": "npub1w0uv0dwm693w5y9x5392dythppd5a3pw2dh00qykng0sucd42faqhpm2x8",
+    "nrepo": "nrepo1w0uv0dwm693w5y9x5392dythppd5a3pw2dh00qykng0sucd42faq763cpx",
+    "taproot": "bc1pw0uv0dwm693w5y9x5392dythppd5a3pw2dh00qykng0sucd42faq5p8pw9",
+    "taproottestnet": "tb1pw0uv0dwm693w5y9x5392dythppd5a3pw2dh00qykng0sucd42faqrf3w52",
+    "wiftestnet": "cQiZEf17NwuTw5GUKEzHMg84k5oGguZtowbDny5NuSJYoU8GmwkL"
+  },
+  {
+    "privkey": "f8af821c606ba9aebeaade5e634cb685f603668f813fc112b45666d73d803fb0",
+    "nsec": "nsec1lzhcy8rqdw56a042me0xxn9kshmqxe50syluzy452endw0vq87cqpudzzn",
+    "pubkey": "56b8efcaeddd654d5c8151fef3d0748d2cef15aedcb713a3a8b2b70bf9bbae84",
+    "didnostr": "did:nostr:56b8efcaeddd654d5c8151fef3d0748d2cef15aedcb713a3a8b2b70bf9bbae84",
+    "pubkeycompressed": "0256b8efcaeddd654d5c8151fef3d0748d2cef15aedcb713a3a8b2b70bf9bbae84",
+    "npub": "npub126uwljhdm4j56hyp28l085r535kw79dwmjm38gagk2msh7dm46zqgfq27k",
+    "nrepo": "nrepo126uwljhdm4j56hyp28l085r535kw79dwmjm38gagk2msh7dm46zqpj2ceh",
+    "taproot": "bc1p26uwljhdm4j56hyp28l085r535kw79dwmjm38gagk2msh7dm46zqtfupk5",
+    "taproottestnet": "tb1p26uwljhdm4j56hyp28l085r535kw79dwmjm38gagk2msh7dm46zqup2wvm",
+    "wiftestnet": "cVv7ZSjeSu9JXNDzrgmugQX1YpQR8ytdcF8TQp1iV1ANpDxU1n76"
+  },
+  {
+    "privkey": "81f9324f0671ea3055b6f80d341c8b2777daa3968fed11f7ca1de95c4a05719d",
+    "nsec": "nsec1s8unyncxw84rq4dklqxng8ytyama4guk3lk3ra72rh54cjs9wxws07j3er",
+    "pubkey": "3242bb984be88e75e8d36c1c6f0dd7b91bdc8ab61c4067e10e0bcfdb797a0e3e",
+    "didnostr": "did:nostr:3242bb984be88e75e8d36c1c6f0dd7b91bdc8ab61c4067e10e0bcfdb797a0e3e",
+    "pubkeycompressed": "033242bb984be88e75e8d36c1c6f0dd7b91bdc8ab61c4067e10e0bcfdb797a0e3e",
+    "npub": "npub1xfpthxztaz88t6xndswx7rwhhydaez4kr3qx0cgwp08ak7t6pclqjdqcmj",
+    "nrepo": "nrepo1xfpthxztaz88t6xndswx7rwhhydaez4kr3qx0cgwp08ak7t6pclqmk22un",
+    "taproot": "bc1pxfpthxztaz88t6xndswx7rwhhydaez4kr3qx0cgwp08ak7t6pclq3dunns",
+    "taproottestnet": "tb1pxfpthxztaz88t6xndswx7rwhhydaez4kr3qx0cgwp08ak7t6pclqx92ufl",
+    "wiftestnet": "cRwMRigtQkKR4QiiAsD9gKueuvmAZUfgUzjeYqBDLwePfxkMsBem"
+  }
+]
