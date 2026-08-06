@@ -5,7 +5,7 @@ import { schnorr } from '@noble/curves/secp256k1';
 import { sha256 } from '@noble/hashes/sha256';
 import {
   getPublicKey, getXOnlyPubKey, getTaprootAddress,
-  privateKeyToWIF, wifToPrivateKey,
+  privateKeyToWIF, wifToPrivateKey, parsePrivateKey,
   bytesToHex, hexToBytes, bech32Encode, bech32Decode, convertBits,
   decodeAddress, createTransaction, taggedHash,
   BECH32_CONST, BECH32M_CONST
@@ -48,6 +48,13 @@ for (const v of vectors) {
   test(`vector ${label}: WIF`, () => {
     assert.equal(privateKeyToWIF(priv), v.wiftestnet);
     assert.equal(bytesToHex(wifToPrivateKey(v.wiftestnet)), v.privkey);
+  });
+
+  test(`vector ${label}: parsePrivateKey accepts hex, nsec, and WIF`, () => {
+    assert.equal(bytesToHex(parsePrivateKey(v.privkey)), v.privkey);
+    assert.equal(bytesToHex(parsePrivateKey(v.privkey.toUpperCase())), v.privkey);
+    assert.equal(bytesToHex(parsePrivateKey(v.nsec)), v.privkey);
+    assert.equal(bytesToHex(parsePrivateKey(v.wiftestnet)), v.privkey);
   });
 
   test(`vector ${label}: schnorr pubkey matches address key`, () => {
@@ -134,6 +141,21 @@ test('createTransaction: valid schnorr key-path signature over BIP341 sighash', 
 
   assert.ok(schnorr.verify(sig, sighash, hexToBytes(sender.pubkey)),
     'witness signature verifies against the untweaked output key');
+});
+
+// ---- checksum validation ----
+
+test('corrupted nsec and address checksums are rejected', () => {
+  const v = vectors[0];
+  // flip the final character of the nsec (guaranteed checksum break)
+  const badNsec = v.nsec.slice(0, -1) + (v.nsec.endsWith('9') ? '8' : '9');
+  assert.throws(() => parsePrivateKey(badNsec));
+  const badAddr = v.taproottestnet.slice(0, -1) + (v.taproottestnet.endsWith('2') ? '3' : '2');
+  assert.throws(() => decodeAddress(badAddr));
+  // v1 witness program with a bech32 (not bech32m) checksum must be rejected
+  const words = [1].concat(convertBits(Array.from(hexToBytes(v.pubkey)), 8, 5));
+  const wrongSpec = bech32Encode('tb', words, BECH32_CONST);
+  assert.throws(() => decodeAddress(wrongSpec));
 });
 
 // ---- bech32m sanity against an official BIP341 reference vector ----

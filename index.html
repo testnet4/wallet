@@ -61,7 +61,7 @@
     import QRCode from 'https://esm.sh/qrcode@1.5.3';
     import {
       generatePrivateKey, getPublicKey, getXOnlyPubKey, getTaprootAddress,
-      privateKeyToWIF, wifToPrivateKey, bytesToHex, hexToBytes, createTransaction
+      privateKeyToWIF, parsePrivateKey, bytesToHex, hexToBytes, createTransaction
     } from './bitcoin.js';
 
     const html = htm.bind(h);
@@ -164,6 +164,26 @@
         if (savedWallet) {
           setWallet(savedWallet);
         }
+        // Import a key passed in the URL fragment: #<hex|nsec|WIF> or
+        // #privkey=<hex|nsec|WIF>. The fragment is never sent to the server;
+        // it is scrubbed from the address bar after a successful import.
+        const applyHashKey = () => {
+          let hash = decodeURIComponent(window.location.hash.slice(1));
+          if (!hash) return;
+          if (hash.startsWith('privkey=')) hash = hash.slice(8);
+          let privateKey;
+          try {
+            privateKey = parsePrivateKey(hash);
+          } catch {
+            return; // not a key — ignore stray fragments
+          }
+          if (importWallet(bytesToHex(privateKey))) {
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+          }
+        };
+        applyHashKey();
+        window.addEventListener('hashchange', applyHashKey);
+        return () => window.removeEventListener('hashchange', applyHashKey);
       }, []);
 
       useEffect(() => {
@@ -218,17 +238,7 @@
 
       const importWallet = (input) => {
         try {
-          const trimmed = input.trim();
-          let privateKey;
-
-          // Check if it's a 64-char hex string (32 bytes)
-          if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
-            privateKey = hexToBytes(trimmed);
-          } else {
-            // Try WIF format
-            privateKey = wifToPrivateKey(trimmed);
-          }
-
+          const privateKey = parsePrivateKey(input);
           const publicKey = getPublicKey(privateKey);
           const xOnlyPubKey = getXOnlyPubKey(privateKey);
           const address = getTaprootAddress(privateKey);
@@ -246,8 +256,10 @@
           saveWallet(newWallet);
           showNotification('Wallet imported successfully!', 'success');
           setView('home');
+          return true;
         } catch (error) {
-          showNotification('Invalid private key (use 64-char hex or WIF)', 'error');
+          showNotification('Invalid private key (use 64-char hex, nsec, or WIF)', 'error');
+          return false;
         }
       };
 
@@ -511,10 +523,10 @@
                     type="password"
                     value=${wifInput}
                     onInput=${(e) => setWifInput(e.target.value)}
-                    placeholder="64-char hex (Nostr nsec) or WIF..."
+                    placeholder="64-char hex, nsec1..., or WIF..."
                     class="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-primary-500"
                   />
-                  <p class="text-gray-500 text-xs mt-1">Supports 64-char hex (same as Nostr) or WIF format</p>
+                  <p class="text-gray-500 text-xs mt-1">Supports 64-char hex, Nostr nsec, or WIF format</p>
                 </div>
                 <div class="flex gap-3">
                   <button

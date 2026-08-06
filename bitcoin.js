@@ -71,7 +71,9 @@ export function bech32Decode(str) {
     if (idx === -1) return null;
     data.push(idx);
   }
-  return { hrp, data: data.slice(0, -6) };
+  // spec equals BECH32_CONST or BECH32M_CONST when the checksum is valid
+  const spec = bech32Polymod(bech32HrpExpand(hrp).concat(data));
+  return { hrp, data: data.slice(0, -6), spec };
 }
 
 export function convertBits(data, fromBits, toBits, pad = true) {
@@ -213,6 +215,24 @@ export function wifToPrivateKey(wif) {
   return decoded.slice(1, decoded[decoded.length - 1] === 0x01 ? -1 : decoded.length);
 }
 
+// Parse a private key in any supported format: 64-char hex, Nostr nsec, or WIF
+export function parsePrivateKey(input) {
+  const trimmed = input.trim();
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+    return hexToBytes(trimmed.toLowerCase());
+  }
+  if (/^nsec1[a-z0-9]+$/i.test(trimmed)) {
+    const decoded = bech32Decode(trimmed);
+    if (!decoded || decoded.hrp !== 'nsec' || decoded.spec !== BECH32_CONST) {
+      throw new Error('Invalid nsec checksum');
+    }
+    const bytes = new Uint8Array(convertBits(decoded.data, 5, 8, false));
+    if (bytes.length !== 32) throw new Error('Invalid nsec length');
+    return bytes;
+  }
+  return wifToPrivateKey(trimmed);
+}
+
 // ===== TRANSACTION BUILDING =====
 
 export function varInt(n) {
@@ -245,6 +265,9 @@ export function decodeAddress(address) {
     const decoded = bech32Decode(address);
     if (!decoded) throw new Error('Invalid bech32 address');
     const witnessVersion = decoded.data[0];
+    // BIP350: witness v0 uses bech32, v1+ uses bech32m
+    const expectedSpec = witnessVersion === 0 ? BECH32_CONST : BECH32M_CONST;
+    if (decoded.spec !== expectedSpec) throw new Error('Invalid address checksum');
     const witnessProgram = convertBits(decoded.data.slice(1), 5, 8, false);
 
     if (witnessVersion === 1 && witnessProgram.length === 32) {
