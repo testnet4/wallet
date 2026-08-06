@@ -169,17 +169,10 @@
       useEffect(() => {
         if (wallet) {
           refreshData();
-          // One-time notice: the address scheme changed to untweaked (npub-aligned)
-          if (!localStorage.getItem('testnet4_scheme_notice_v1')) {
-            setShowSchemeInfo(true);
-          }
         }
       }, [wallet]);
 
-      const closeSchemeInfo = () => {
-        localStorage.setItem('testnet4_scheme_notice_v1', '1');
-        setShowSchemeInfo(false);
-      };
+      const closeSchemeInfo = () => setShowSchemeInfo(false);
 
       const showNotification = (message, type = 'info') => {
         setNotification({ message, type });
